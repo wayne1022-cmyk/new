@@ -14,6 +14,8 @@ from groq import Groq
 
 # 沿用第一個檔案的 Chrome 尋找邏輯與 User-Agent
 from ctee_scraper import (
+    BlockedError,
+    close_browser,
     create_browser,
     prepare_page,
     safe_goto,
@@ -158,6 +160,7 @@ async def scrape_article(page, article):
     except Exception as e:
         print(f"❌ 抓取失敗：{e}")
         return {
+            "blocked": isinstance(e, BlockedError),
             **article,
             "scraped_title": "",
             "author": "",
@@ -306,6 +309,7 @@ async def process_all_articles(article_data):
     await prepare_page(page, browser)
 
     results = []
+    blocked_streak = 0
     total = len(article_data["articles"])
 
     print("\n" + "=" * 80)
@@ -318,10 +322,22 @@ async def process_all_articles(article_data):
             print(f"進度：{i} / {total}")
             print("#" * 80)
 
-            results.append(await process_article(page, article))
+            result = await process_article(page, article)
+            results.append(result)
+
+            # 連續被 Cloudflare 擋下就不要再浪費時間了
+            blocked_streak = blocked_streak + 1 if result.get("blocked") else 0
+            if blocked_streak >= 2:
+                print("❌ 連續 2 篇被 Cloudflare 擋下，停止抓取剩餘文章")
+                for rest in article_data["articles"][i:]:
+                    results.append({**rest, "content": "", "summary": "",
+                                    "scrape_status": "failed", "ai_status": "skipped",
+                                    "scrape_error": "被 Cloudflare 擋下，未嘗試"})
+                break
+
             await asyncio.sleep(1)  # 避免連續快速打 API
     finally:
-        await browser.close()
+        await close_browser(browser)
 
     scrape_success = sum(1 for x in results if x.get("scrape_status") == "success")
     ai_success = sum(1 for x in results if x.get("ai_status") == "success")
