@@ -1,0 +1,50 @@
+name: Daily Premarket News
+
+on:
+  schedule:
+    # GitHub 使用 UTC。台灣 = UTC+8
+    # 這行 = 台灣時間 週一～週五 08:30
+    - cron: "30 0 * * 1-5"
+  workflow_dispatch: # 允許手動按鈕觸發，方便測試
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 1. Scrape CTEE premarket news
+        env:
+          PYPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+          CHROME_PATH: /usr/bin/google-chrome
+        run: python ctee_scraper.py
+
+      # ---- 之後接上你的第二、第三個檔案 ----
+      # - name: 2. Analyze with AI
+      #   env:
+      #     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}   # 或 GEMINI / ANTHROPIC
+      #   run: python analyze.py
+      #
+      # - name: 3. Send email
+      #   env:
+      #     SMTP_USER: ${{ secrets.SMTP_USER }}
+      #     SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      #     MAIL_TO: ${{ secrets.MAIL_TO }}
+      #   run: python send_email.py
+
+      - name: Upload scraped data (debug 用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: premarket-articles
+          path: output/
