@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin
 
@@ -31,6 +32,12 @@ OUTPUT_DIR = "output"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "premarket_articles.json")
 
 TW_TZ = timezone(timedelta(hours=8))
+
+# 是否允許在「今天的盤前還沒發布」時，改用最近一篇（測試用）
+ALLOW_STALE = os.environ.get("ALLOW_STALE", "false").lower() == "true"
+
+# 今天的盤前還沒出現時，最多等待幾分鐘（每 5 分鐘重新檢查一次）
+MAX_WAIT_MINUTES = int(os.environ.get("MAX_WAIT_MINUTES", "0") or 0)
 
 # 依序尋找 Chrome：環境變數 > Linux (GitHub Actions) > Mac
 CHROME_CANDIDATES = [
@@ -161,32 +168,80 @@ async def dump_debug(page, name):
 # 3. 載入更多新聞
 # ============================================================
 
+# 不限定標籤：只要「自己的文字」剛好是「載入更多」的可見元素就點
+LOAD_MORE_JS = r"""
+() => {
+    const norm = (t) => (t || "").replace(/\s+/g, "");
+
+    const matches = Array.from(document.querySelectorAll("body *")).filter(el => {
+        const own = norm(
+            Array.from(el.childNodes)
+                .filter(n => n.nodeType === 3)
+                .map(n => n.nodeValue)
+                .join("")
+        );
+        return own === "載入更多" || norm(el.textContent) === "載入更多";
+    });
+
+    const visible = matches.filter(el => el.getClientRects().length > 0);
+    const newsCount = document.querySelectorAll('a[href*="/news/"]').length;
+
+    if (!visible.length) {
+        // 找不到時，回報頁面上含「載入」或「更多」的元素，方便除錯
+        const near = Array.from(document.querySelectorAll("body *"))
+            .filter(el => el.children.length === 0 && /載入|更多|more/i.test(el.textContent || ""))
+            .slice(0, 10)
+            .map(el => `${el.tagName}.${el.className} → ${(el.textContent || "").trim().slice(0, 30)}`);
+        return { found: false, newsCount, near };
+    }
+
+    const target = visible[visible.length - 1]; // 文件順序最後 = 最內層
+    target.scrollIntoView({ block: "center" });
+    target.click();
+
+    return {
+        found: true,
+        newsCount,
+        tag: target.tagName,
+        cls: String(target.className || "")
+    };
+}
+"""
+
+
+async def count_news_links(page):
+    return await page.evaluate("() => document.querySelectorAll('a[href*=\"/news/\"]').length")
+
+
 async def load_more(page, max_clicks=7, wait_time=2):
     print("\n========== 開始載入更多 ==========")
 
-    js = """
-    () => {
-        const els = Array.from(
-            document.querySelectorAll("button, a, [role='button']")
-        );
-        const target = els.find(
-            e => (e.innerText || e.textContent || '').includes('載入更多')
-        );
-        if (!target) return false;
-        target.scrollIntoView({block: 'center'});
-        target.click();
-        return true;
-    }
-    """
+    # 先捲到底，讓延遲載入的按鈕出現
+    await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+    await asyncio.sleep(1.5)
 
     for i in range(max_clicks):
         try:
-            clicked = await page.evaluate(js)
-            if not clicked:
+            info = await page.evaluate(LOAD_MORE_JS)
+
+            if not info.get("found"):
                 print("沒有找到「載入更多」，停止。")
+                for line in info.get("near", []):
+                    print("  疑似元素：", line)
                 break
-            print(f"已點擊載入更多：第 {i + 1} 次")
+
+            print(
+                f"已點擊載入更多：第 {i + 1} 次"
+                f"（{info['tag']}.{info['cls']}，點擊前新聞連結 {info['newsCount']} 個）"
+            )
             await asyncio.sleep(wait_time)
+            await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+
+            after = await count_news_links(page)
+            print(f"  點擊後新聞連結：{after} 個")
+            if after <= info["newsCount"]:
+                print("  ⚠️ 連結數量沒有增加，再等待一下")
+                await asyncio.sleep(3)
         except Exception as e:
             print("點擊載入更多失敗：", e)
             break
@@ -371,9 +426,28 @@ async def find_latest_premarket_hub(page):
         print(f"{i}. {hub['title']}\n   {hub['url']}")
     print("-" * 80)
 
-    latest = hubs[0]  # 頁面由新到舊，第一個視為最新
-    print(f"\n最新盤前：{latest['title']}\n{latest['url']}")
-    return latest
+    # ---- 用標題裡的日期（例如「9／21盤前｜」）挑出今天的盤前 ----
+    today = datetime.now(TW_TZ)
+    print(f"今天（台灣時間）：{today.month}/{today.day}")
+
+    for hub in hubs:
+        m = re.search(r"(\d{1,2})\s*[／/]\s*(\d{1,2})\s*盤前", hub["title"])
+        hub["date"] = f"{m.group(1)}/{m.group(2)}" if m else None
+
+    todays = [h for h in hubs if h["date"] == f"{today.month}/{today.day}"]
+
+    if todays:
+        chosen = todays[0]
+        print(f"\n✅ 找到今天的盤前：{chosen['title']}\n{chosen['url']}")
+        return chosen
+
+    latest = hubs[0]
+    if ALLOW_STALE:
+        print(f"\n⚠️ 今天的盤前尚未發布，測試模式改用最近一篇：{latest['title']}")
+        return latest
+
+    print(f"\n❌ 今天的盤前尚未發布（頁面上最新的是：{latest['title']}）")
+    return None
 
 
 # ============================================================
@@ -442,9 +516,15 @@ async def main():
         page = await browser.newPage()
         await prepare_page(page, browser)
 
-        hub = await find_latest_premarket_hub(page)
-        if not hub:
-            return {"hub": None, "articles": []}
+        deadline = time.monotonic() + MAX_WAIT_MINUTES * 60
+        while True:
+            hub = await find_latest_premarket_hub(page)
+            if hub:
+                break
+            if time.monotonic() >= deadline:
+                return {"hub": None, "articles": []}
+            print("5 分鐘後重新檢查…")
+            await asyncio.sleep(300)
 
         articles = await get_premarket_articles(page, hub)
 
