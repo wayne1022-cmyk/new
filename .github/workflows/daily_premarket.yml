@@ -3,14 +3,20 @@ name: Daily Premarket News
 on:
   schedule:
     # GitHub 使用 UTC。台灣 = UTC+8
-    # 這行 = 台灣時間 週一～週五 08:30
-    - cron: "30 0 * * 1-5"
+    # 這行 = 台灣時間 週一～週五 07:45（UTC 週日～週四 23:45）
+    # 程式會等到今天的盤前發布（最多 45 分鐘）
+    - cron: "45 23 * * 0-4"
   workflow_dispatch: # 允許手動按鈕觸發，方便測試
+    inputs:
+      allow_stale:
+        description: "測試用：今天盤前未發布時，改用最近一篇"
+        type: boolean
+        default: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v5
@@ -29,6 +35,9 @@ jobs:
         env:
           PYPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
           CHROME_PATH: /usr/bin/google-chrome
+          # 手動執行：依上面的勾選；排程執行：一律要求今天的盤前並等待
+          ALLOW_STALE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_stale || 'false' }}
+          MAX_WAIT_MINUTES: ${{ github.event_name == 'schedule' && '45' || '0' }}
         run: python ctee_scraper.py
 
       - name: 2. Analyze with Groq
