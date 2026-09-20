@@ -16,7 +16,8 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 手動測試 20 分鐘就該結束；排程要預留等待盤前的時間
+    timeout-minutes: ${{ github.event_name == 'schedule' && 90 || 20 }}
 
     steps:
       - uses: actions/checkout@v5
@@ -35,6 +36,7 @@ jobs:
           sudo apt-get install -y xvfb
 
       - name: 1. Scrape CTEE premarket news
+        timeout-minutes: ${{ github.event_name == 'schedule' && 60 || 10 }}
         env:
           PYPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
           CHROME_PATH: /usr/bin/google-chrome
@@ -45,6 +47,7 @@ jobs:
         run: xvfb-run -a --server-args="-screen 0 1920x1080x24" python ctee_scraper.py
 
       - name: 2. Analyze with Groq
+        timeout-minutes: 15
         env:
           PYPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
           CHROME_PATH: /usr/bin/google-chrome
