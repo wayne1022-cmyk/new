@@ -75,6 +75,10 @@ async def create_browser():
     chrome_path = find_chrome()
     print(f"使用 Chrome：{chrome_path}")
 
+    return await asyncio.wait_for(_launch(chrome_path), timeout=60)
+
+
+async def _launch(chrome_path):
     return await launch(
         headless=HEADLESS,
         ignoreDefaultArgs=["--enable-automation"],
@@ -94,6 +98,19 @@ async def create_browser():
     )
 
 
+async def close_browser(browser):
+    """關閉 Chrome；卡住時強制結束，避免整個程式掛著不退出。"""
+    try:
+        await asyncio.wait_for(browser.close(), timeout=20)
+        print("\nChrome 已關閉")
+    except Exception as e:
+        print(f"\nChrome 關閉逾時（{e}），強制結束")
+        try:
+            browser.process.kill()
+        except Exception:
+            pass
+
+
 class BlockedError(RuntimeError):
     """被 Cloudflare 驗證頁擋下。"""
 
@@ -111,7 +128,7 @@ async def is_challenge_page(page):
     return any(t in title for t in CHALLENGE_TITLES) or any(t in body for t in CHALLENGE_TEXTS)
 
 
-async def wait_for_challenge(page, timeout=60):
+async def wait_for_challenge(page, timeout=30):
     """遇到 Cloudflare 驗證頁時等待它自動通過。回傳是否通過。"""
     if not await is_challenge_page(page):
         return True
@@ -132,10 +149,10 @@ async def wait_for_challenge(page, timeout=60):
 async def safe_goto(page, url):
     """networkidle2 在廣告多的網站可能逾時，失敗就退而求其次；並處理 Cloudflare 驗證頁。"""
     try:
-        await page.goto(url, {"waitUntil": "networkidle2", "timeout": 60000})
+        await page.goto(url, {"waitUntil": "networkidle2", "timeout": 30000})
     except Exception as e:
         print(f"networkidle2 逾時（{e}），改用 domcontentloaded 重試")
-        await page.goto(url, {"waitUntil": "domcontentloaded", "timeout": 60000})
+        await page.goto(url, {"waitUntil": "domcontentloaded", "timeout": 30000})
     await asyncio.sleep(3)
 
     if not await wait_for_challenge(page):
@@ -574,15 +591,18 @@ async def run_once():
         }
     finally:
         if browser:
-            await browser.close()
-            print("\nChrome 已關閉")
+            await close_browser(browser)
 
 
-async def main(max_attempts=3):
+async def main(max_attempts=2):
     """被 Cloudflare 擋下時，換一個全新的瀏覽器工作階段重試。"""
     for attempt in range(1, max_attempts + 1):
         try:
-            return await run_once()
+            # 整體時間上限：等待盤前的時間 + 8 分鐘，避免無限期卡住
+            return await asyncio.wait_for(run_once(), timeout=(MAX_WAIT_MINUTES + 8) * 60)
+        except asyncio.TimeoutError:
+            print("❌ 執行逾時，強制結束")
+            return {"hub": None, "articles": [], "timeout": True}
         except BlockedError as e:
             print(f"❌ 第 {attempt}/{max_attempts} 次嘗試失敗：{e}")
             if attempt < max_attempts:
