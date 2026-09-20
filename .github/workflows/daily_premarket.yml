@@ -29,18 +29,19 @@ jobs:
           CHROME_PATH: /usr/bin/google-chrome
         run: python ctee_scraper.py
 
-      # ---- 之後接上你的第二、第三個檔案 ----
-      # - name: 2. Analyze with AI
-      #   env:
-      #     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}   # 或 GEMINI / ANTHROPIC
-      #   run: python analyze.py
-      #
-      # - name: 3. Send email
-      #   env:
-      #     SMTP_USER: ${{ secrets.SMTP_USER }}
-      #     SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-      #     MAIL_TO: ${{ secrets.MAIL_TO }}
-      #   run: python send_email.py
+      - name: 2. Analyze with Groq
+        env:
+          PYPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+          CHROME_PATH: /usr/bin/google-chrome
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python analyze.py
+
+      - name: 3. Send email
+        env:
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python send_email.py
 
       - name: Upload scraped data (debug 用)
         if: always()
