@@ -92,6 +92,71 @@ async def safe_goto(page, url):
     await asyncio.sleep(3)
 
 
+
+# ============================================================
+# 2.5 除錯 / 反偵測工具
+# ============================================================
+
+STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['zh-TW', 'zh', 'en-US', 'en'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+window.chrome = window.chrome || { runtime: {} };
+"""
+
+
+async def prepare_page(page, browser):
+    """設定 UA（去掉 HeadlessChrome 字樣）、語系與基本反偵測。"""
+    version = await browser.version()  # 例如 "HeadlessChrome/141.0.7390.54"
+    m = re.search(r"/(\d+\.\d+\.\d+\.\d+)", version)
+    chrome_ver = m.group(1) if m else "131.0.0.0"
+
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{chrome_ver} Safari/537.36"
+    )
+    print(f"瀏覽器版本：{version}")
+
+    await page.setUserAgent(ua)
+    await page.setViewport({"width": 1920, "height": 1080})
+    await page.setExtraHTTPHeaders({"Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"})
+    await page.evaluateOnNewDocument(STEALTH_JS)
+
+
+async def dump_debug(page, name):
+    """印出頁面狀態，並存下截圖與 HTML（會隨 artifact 一起上傳）。"""
+    try:
+        os.makedirs(os.path.join(OUTPUT_DIR, "debug"), exist_ok=True)
+
+        info = await page.evaluate(
+            """
+            () => ({
+                url: location.href,
+                title: document.title,
+                linkCount: document.querySelectorAll("a[href]").length,
+                newsLinkCount: Array.from(document.querySelectorAll("a[href]"))
+                    .filter(a => a.href.includes("/news/")).length,
+                bodyText: (document.body ? document.body.innerText : "").slice(0, 600)
+            })
+            """
+        )
+        print(f"\n--- DEBUG [{name}] ---")
+        print(f"URL：{info['url']}")
+        print(f"標題：{info['title']}")
+        print(f"<a> 總數：{info['linkCount']}｜含 /news/ 的連結：{info['newsLinkCount']}")
+        print("頁面文字開頭：")
+        print(info["bodyText"])
+        print("--- END DEBUG ---\n")
+
+        await page.screenshot({"path": os.path.join(OUTPUT_DIR, "debug", f"{name}.png")})
+        html = await page.content()
+        with open(os.path.join(OUTPUT_DIR, "debug", f"{name}.html"), "w", encoding="utf-8") as f:
+            f.write(html)
+    except Exception as e:
+        print(f"dump_debug 失敗：{e}")
+
+
 # ============================================================
 # 3. 載入更多新聞
 # ============================================================
@@ -262,7 +327,10 @@ async def find_latest_premarket_hub(page):
     print("=" * 80)
 
     await safe_goto(page, LIVE_NEWS_URL)
+    await dump_debug(page, "1_livenews_loaded")
+
     await load_more(page, max_clicks=7, wait_time=2)
+    await dump_debug(page, "2_livenews_after_load_more")
 
     links = await page.evaluate(FIND_LINKS_JS)
 
@@ -291,6 +359,10 @@ async def find_latest_premarket_hub(page):
 
     if not hubs:
         print("❌ 找不到盤前 Hub")
+        sample = [x["title"] or x["text"] for x in links if "/news/" in x["url"]][:15]
+        print("頁面上前 15 個新聞連結標題（供對照）：")
+        for t in sample:
+            print("  -", t)
         return None
 
     print("\n找到的盤前 Hub")
@@ -314,6 +386,7 @@ async def get_premarket_articles(page, hub):
     print("=" * 80)
 
     await safe_goto(page, hub["url"])
+    await dump_debug(page, "3_hub_page")
 
     result = await create_text_range(page, START_MARKER, END_MARKER)
 
@@ -367,8 +440,7 @@ async def main():
     try:
         browser = await create_browser()
         page = await browser.newPage()
-        await page.setUserAgent(USER_AGENT)
-        await page.setViewport({"width": 1920, "height": 1080})
+        await prepare_page(page, browser)
 
         hub = await find_latest_premarket_hub(page)
         if not hub:
