@@ -11,10 +11,13 @@ import re
 import sys
 
 from groq import Groq
-from pyppeteer import launch
 
 # 沿用第一個檔案的 Chrome 尋找邏輯與 User-Agent
-from ctee_scraper import find_chrome, USER_AGENT
+from ctee_scraper import (
+    create_browser,
+    prepare_page,
+    safe_goto,
+)
 
 # ============================================================
 # 1. 基本設定
@@ -40,24 +43,8 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 
 # ============================================================
-# 2. 瀏覽器
+# 2. 瀏覽器（沿用 ctee_scraper 的設定：有畫面 Chrome + Cloudflare 等待）
 # ============================================================
-
-async def create_browser():
-    return await launch(
-        headless=True,
-        executablePath=find_chrome(),
-        args=[
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--lang=zh-TW",
-        ],
-        handleSIGINT=False,
-        handleSIGTERM=False,
-        handleSIGHUP=False,
-    )
 
 
 def clean_text(text):
@@ -142,11 +129,7 @@ async def scrape_article(page, article):
     print("=" * 80)
 
     try:
-        try:
-            await page.goto(url, {"waitUntil": "networkidle2", "timeout": 60000})
-        except Exception:
-            await page.goto(url, {"waitUntil": "domcontentloaded", "timeout": 60000})
-        await asyncio.sleep(2)
+        await safe_goto(page, url)
 
         data = await page.evaluate(EXTRACT_JS)
 
@@ -320,8 +303,7 @@ async def process_article(page, article):
 async def process_all_articles(article_data):
     browser = await create_browser()
     page = await browser.newPage()
-    await page.setUserAgent(USER_AGENT)
-    await page.setViewport({"width": 1440, "height": 900})
+    await prepare_page(page, browser)
 
     results = []
     total = len(article_data["articles"])
