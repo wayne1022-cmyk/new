@@ -33,6 +33,10 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, "premarket_articles.json")
 
 TW_TZ = timezone(timedelta(hours=8))
 
+# 預設使用「有畫面」的 Chrome（在 GitHub 上搭配 xvfb 虛擬螢幕），
+# 比 headless 更不容易被 Cloudflare 判定為機器人。要用 headless 可設 HEADLESS=true
+HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
+
 # 是否允許在「今天的盤前還沒發布」時，改用最近一篇（測試用）
 ALLOW_STALE = os.environ.get("ALLOW_STALE", "false").lower() == "true"
 
@@ -72,7 +76,8 @@ async def create_browser():
     print(f"使用 Chrome：{chrome_path}")
 
     return await launch(
-        headless=True,
+        headless=HEADLESS,
+        ignoreDefaultArgs=["--enable-automation"],
         executablePath=chrome_path,
         args=[
             "--no-sandbox",
@@ -89,8 +94,43 @@ async def create_browser():
     )
 
 
+class BlockedError(RuntimeError):
+    """被 Cloudflare 驗證頁擋下。"""
+
+
+CHALLENGE_TITLES = ("請稍候", "Just a moment", "Attention Required")
+CHALLENGE_TEXTS = ("正在執行安全驗證", "Checking your browser", "Verify you are human")
+
+
+async def is_challenge_page(page):
+    try:
+        title = await page.title()
+        body = await page.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 500)")
+    except Exception:
+        return True  # 頁面正在跳轉中，視為尚未完成
+    return any(t in title for t in CHALLENGE_TITLES) or any(t in body for t in CHALLENGE_TEXTS)
+
+
+async def wait_for_challenge(page, timeout=60):
+    """遇到 Cloudflare 驗證頁時等待它自動通過。回傳是否通過。"""
+    if not await is_challenge_page(page):
+        return True
+
+    print("⚠️ 偵測到 Cloudflare 安全驗證，等待自動通過…")
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        await asyncio.sleep(2)
+        if not await is_challenge_page(page):
+            print(f"✅ 驗證通過（等了 {time.monotonic() - start:.0f} 秒）")
+            await asyncio.sleep(2)
+            return True
+
+    print("❌ 驗證逾時，仍停在 Cloudflare 驗證頁")
+    return False
+
+
 async def safe_goto(page, url):
-    """networkidle2 在廣告多的網站可能逾時，失敗就退而求其次。"""
+    """networkidle2 在廣告多的網站可能逾時，失敗就退而求其次；並處理 Cloudflare 驗證頁。"""
     try:
         await page.goto(url, {"waitUntil": "networkidle2", "timeout": 60000})
     except Exception as e:
@@ -98,6 +138,9 @@ async def safe_goto(page, url):
         await page.goto(url, {"waitUntil": "domcontentloaded", "timeout": 60000})
     await asyncio.sleep(3)
 
+    if not await wait_for_challenge(page):
+        await dump_debug(page, "blocked")
+        raise BlockedError(f"被 Cloudflare 擋下：{url}")
 
 
 # ============================================================
@@ -106,26 +149,22 @@ async def safe_goto(page, url):
 
 STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-Object.defineProperty(navigator, 'languages', { get: () => ['zh-TW', 'zh', 'en-US', 'en'] });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-window.chrome = window.chrome || { runtime: {} };
 """
 
 
 async def prepare_page(page, browser):
-    """設定 UA（去掉 HeadlessChrome 字樣）、語系與基本反偵測。"""
-    version = await browser.version()  # 例如 "HeadlessChrome/141.0.7390.54"
-    m = re.search(r"/(\d+\.\d+\.\d+\.\d+)", version)
-    chrome_ver = m.group(1) if m else "131.0.0.0"
-
-    ua = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        f"Chrome/{chrome_ver} Safari/537.36"
-    )
+    """基本設定。有畫面模式不改 UA（和真實環境一致）；headless 才去掉 HeadlessChrome 字樣。"""
+    version = await browser.version()
     print(f"瀏覽器版本：{version}")
 
-    await page.setUserAgent(ua)
+    if HEADLESS:
+        m = re.search(r"/(\d+\.\d+\.\d+\.\d+)", version)
+        chrome_ver = m.group(1) if m else "131.0.0.0"
+        await page.setUserAgent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36"
+        )
+
     await page.setViewport({"width": 1920, "height": 1080})
     await page.setExtraHTTPHeaders({"Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"})
     await page.evaluateOnNewDocument(STEALTH_JS)
@@ -509,7 +548,7 @@ async def get_premarket_articles(page, hub):
 # 8. 主程式
 # ============================================================
 
-async def main():
+async def run_once():
     browser = None
     try:
         browser = await create_browser()
@@ -537,6 +576,19 @@ async def main():
         if browser:
             await browser.close()
             print("\nChrome 已關閉")
+
+
+async def main(max_attempts=3):
+    """被 Cloudflare 擋下時，換一個全新的瀏覽器工作階段重試。"""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await run_once()
+        except BlockedError as e:
+            print(f"❌ 第 {attempt}/{max_attempts} 次嘗試失敗：{e}")
+            if attempt < max_attempts:
+                print("30 秒後以全新瀏覽器重試…")
+                await asyncio.sleep(30)
+    return {"hub": None, "articles": [], "blocked": True}
 
 
 def save_result(result):
