@@ -29,7 +29,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install "pyppeteer>=2.0.0" groq
+        run: |
+          pip install "pyppeteer>=2.0.0" groq
+          sudo apt-get update
+          sudo apt-get install -y xvfb
 
       - name: 1. Scrape CTEE premarket news
         env:
@@ -38,14 +41,15 @@ jobs:
           # 手動執行：依上面的勾選；排程執行：一律要求今天的盤前並等待
           ALLOW_STALE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_stale || 'false' }}
           MAX_WAIT_MINUTES: ${{ github.event_name == 'schedule' && '45' || '0' }}
-        run: python ctee_scraper.py
+        # xvfb-run 提供虛擬螢幕，讓 Chrome 以「有畫面」模式執行
+        run: xvfb-run -a --server-args="-screen 0 1920x1080x24" python ctee_scraper.py
 
       - name: 2. Analyze with Groq
         env:
           PYPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
           CHROME_PATH: /usr/bin/google-chrome
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: python analyze.py
+        run: xvfb-run -a --server-args="-screen 0 1920x1080x24" python analyze.py
 
       - name: 3. Send email
         env:
