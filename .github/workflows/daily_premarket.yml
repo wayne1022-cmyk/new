@@ -13,15 +13,17 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - name: Show repo files (除錯用，確認檔案位置)
+        run: ls -la
+
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install "pyppeteer>=2.0.0" groq
 
       - name: 1. Scrape CTEE premarket news
         env:
@@ -45,7 +47,7 @@ jobs:
 
       - name: Upload scraped data (debug 用)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: premarket-articles
           path: output/
